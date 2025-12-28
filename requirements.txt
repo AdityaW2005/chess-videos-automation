@@ -1,0 +1,60 @@
+# Chess.com YouTube Shorts Automation - Dependencies
+# Install with: pip install -r requirements.txt
+
+# =============================================================================
+# CORE DEPENDENCIES (Required for game fetching)
+# =============================================================================
+
+# HTTP requests to Chess.com API
+requests>=2.31.0
+
+# =============================================================================
+# CHESS PROCESSING (Required for video generation - Phase 2)
+# =============================================================================
+
+# Chess game analysis, PGN parsing, board rendering
+python-chess>=1.999
+
+# =============================================================================
+# VIDEO GENERATION (Required for video creation - Phase 2)
+# =============================================================================
+
+# Image processing for board positions
+Pillow>=10.0.0
+
+# Video frame manipulation (headless for server deployment)
+opencv-python-headless>=4.8.0.0
+
+# Video editing with audio support
+moviepy>=1.0.3
+
+# =============================================================================
+# YOUTUBE UPLOAD (Required for publishing - Phase 3)
+# =============================================================================
+
+# Google API client for YouTube Data API v3
+google-api-python-client>=2.100.0
+
+# OAuth2 authentication
+google-auth-httplib2>=0.1.1
+google-auth-oauthlib>=1.1.0
+
+# =============================================================================
+# SCHEDULING & AUTOMATION (Optional - for running as service)
+# =============================================================================
+
+# Cron-like scheduler
+schedule>=1.2.0
+
+# Timezone handling
+pytz>=2023.3
+
+# =============================================================================
+# DEVELOPMENT TOOLS (Optional)
+# =============================================================================
+
+# Pretty terminal output
+colorama>=0.4.6
+
+# Progress bars for video processing
+tqdm>=4.66.0

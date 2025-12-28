@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+.venv/
+.env
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Project specific
+games/
+videos/
+logs/
+
+# YouTube credentials (IMPORTANT - keep private!)
+client_secrets.json
+token.json
+credentials.json
+quota_usage.json
+*.pickle
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.temp
+*.log
