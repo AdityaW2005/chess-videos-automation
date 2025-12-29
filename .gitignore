@@ -19,6 +19,7 @@ env/
 games/
 videos/
 logs/
+music/
 
 # YouTube credentials (IMPORTANT - keep private!)
 client_secrets.json

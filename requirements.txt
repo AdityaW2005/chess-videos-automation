@@ -15,6 +15,13 @@ requests>=2.31.0
 # Chess game analysis, PGN parsing, board rendering
 python-chess>=1.999
 
+# Stockfish Python wrapper for position evaluation
+# NOTE: Also requires Stockfish binary:
+#   macOS: brew install stockfish
+#   Ubuntu: sudo apt install stockfish
+#   Windows: Download from stockfishchess.org
+stockfish>=3.28.0
+
 # =============================================================================
 # VIDEO GENERATION (Required for video creation - Phase 2)
 # =============================================================================

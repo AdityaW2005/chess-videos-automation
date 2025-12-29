@@ -44,6 +44,13 @@ from fetch_chess_games import ChessComAPI, GameParser, GameFilter, GameStorage
 from generate_video import ChessVideoGenerator
 from youtube_uploader import YouTubeUploader, VideoMetadata
 
+# Try to import enhanced generator (optional - falls back to basic)
+try:
+    from enhanced_video_generator import EnhancedVideoGenerator
+    ENHANCED_AVAILABLE = True
+except ImportError:
+    ENHANCED_AVAILABLE = False
+
 import pytz
 
 # =============================================================================
@@ -136,8 +143,9 @@ class DailyAutomation:
     Main automation class that orchestrates the daily workflow.
     """
     
-    def __init__(self, dry_run: bool = False):
+    def __init__(self, dry_run: bool = False, use_enhanced: bool = True):
         self.dry_run = dry_run
+        self.use_enhanced = use_enhanced and ENHANCED_AVAILABLE
         self.username = CHESS_COM_USERNAME
         self.tz = pytz.timezone(TIMEZONE)
         
@@ -146,7 +154,26 @@ class DailyAutomation:
         self.parser = GameParser(self.username)
         self.game_filter = GameFilter()  # GameFilter is static methods only
         self.storage = GameStorage(PGN_OUTPUT_DIR, JSON_OUTPUT_DIR)
-        self.video_generator = ChessVideoGenerator(self.username)
+        
+        # Initialize video generator (enhanced if available)
+        if self.use_enhanced:
+            logger.info("🎬 Using Enhanced Video Generator (with Stockfish analysis)")
+            self.video_generator = EnhancedVideoGenerator(
+                player_username=self.username,
+                output_dir=Path(VIDEO_OUTPUT_DIR),
+                enable_stockfish=True,
+                stockfish_depth=12
+            )
+            self.enhanced_mode = self.video_generator.stockfish.is_available() if hasattr(self.video_generator, 'stockfish') else False
+            if self.enhanced_mode:
+                logger.info("✅ Stockfish available - full analysis enabled")
+            else:
+                logger.info("⚠️ Stockfish not available - basic mode")
+        else:
+            logger.info("🎬 Using Basic Video Generator")
+            self.video_generator = ChessVideoGenerator(self.username)
+            self.enhanced_mode = False
+        
         self.uploader = YouTubeUploader()
         self.selector = BestGameSelector()
         
@@ -300,13 +327,23 @@ class DailyAutomation:
         video_name = f"chess_short_{self._sanitize_filename(opponent)}_{datetime.now().strftime('%H%M%S')}"
         
         try:
-            # Update video generator output directory
-            self.video_generator.output_dir = output_dir
-            
-            result_path = self.video_generator.generate_video(
-                pgn_path=str(pgn_file),
-                output_filename=video_name
-            )
+            if self.use_enhanced:
+                # Use enhanced video generator
+                self.video_generator.output_dir = output_dir
+                result_path = self.video_generator.generate_video(
+                    pgn_path=str(pgn_file),
+                    output_filename=video_name
+                )
+                thumbnail_path = Path(result_path).with_suffix('.jpg') if result_path else None
+                if thumbnail_path and thumbnail_path.exists():
+                    logger.info(f"🖼️ Thumbnail: {thumbnail_path.name}")
+            else:
+                # Use basic video generator
+                self.video_generator.output_dir = output_dir
+                result_path = self.video_generator.generate_video(
+                    pgn_path=str(pgn_file),
+                    output_filename=video_name
+                )
             
             if result_path and Path(result_path).exists():
                 self.stats['video_generated'] = True
@@ -324,6 +361,8 @@ class DailyAutomation:
                 
         except Exception as e:
             logger.error(f"❌ Video generation error: {e}")
+            import traceback
+            traceback.print_exc()
             return None
     
     def upload_video(self, video_path: Path, game: Dict[str, Any]) -> Optional[str]:
@@ -432,13 +471,17 @@ class DailyAutomation:
             logger.error("❌ No saved games found")
             return False
         
-        # Get latest date folder
-        date_folders = sorted(games_dir.iterdir(), reverse=True)
+        # Get latest date folder (directories only, not summary files)
+        date_folders = sorted(
+            [d for d in games_dir.iterdir() if d.is_dir()],
+            reverse=True
+        )
         if not date_folders:
             logger.error("❌ No game folders found")
             return False
         
         latest_folder = date_folders[0]
+        logger.info(f"📂 Using games from: {latest_folder.name}")
         json_files = list(latest_folder.glob("*.json"))
         
         if not json_files:
@@ -471,8 +514,9 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python daily_automation.py              # Full pipeline
+  python daily_automation.py              # Full pipeline with enhanced video
   python daily_automation.py --dry-run    # Test without uploading
+  python daily_automation.py --basic      # Use basic video generator (no Stockfish)
   python daily_automation.py --fetch-only # Only fetch games
   python daily_automation.py --video-only # Only generate video
         """
@@ -482,6 +526,12 @@ Examples:
         '--dry-run',
         action='store_true',
         help='Run without uploading to YouTube'
+    )
+    
+    parser.add_argument(
+        '--basic',
+        action='store_true',
+        help='Use basic video generator (no Stockfish analysis, captions, etc.)'
     )
     
     parser.add_argument(
@@ -498,7 +548,8 @@ Examples:
     
     args = parser.parse_args()
     
-    automation = DailyAutomation(dry_run=args.dry_run)
+    use_enhanced = not args.basic
+    automation = DailyAutomation(dry_run=args.dry_run, use_enhanced=use_enhanced)
     
     try:
         if args.fetch_only:
