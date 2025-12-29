@@ -681,6 +681,7 @@ class ChessBeastVideoGenerator:
             self.font_xlarge = ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc", 80)
             self.font_medium = ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc", 36)
             self.font_small = ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc", 28)
+            self.font_tiny = ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc", 18)
             self.font_move = ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc", 72)
             self.piece_font = ImageFont.truetype("/System/Library/Fonts/Apple Symbols.ttf", 100)
             self.capture_font = ImageFont.truetype("/System/Library/Fonts/Apple Symbols.ttf", 36)
@@ -861,8 +862,7 @@ class ChessBeastVideoGenerator:
         flip_board = game_data.player_color == "black"
         
         # === HEADER: Game title (above opponent name) ===
-        draw.text((VIDEO_WIDTH // 2, 60), f"Game {self.game_number} in Blitz", 
-                  fill=COLORS['text_primary'], font=self.font_game_title, anchor="mm")
+        # Removed permanent heading 'Game X in Blitz'
         # Opening name below title
         draw.text((VIDEO_WIDTH // 2, 130), game_data.opening, 
                   fill=COLORS['text_secondary'], font=self.font_medium, anchor="mm")
@@ -905,14 +905,7 @@ class ChessBeastVideoGenerator:
             eval_bar = self.eval_bar.render(0)
             frame.paste(eval_bar, (eval_x, eval_y), eval_bar)
         
-        # === MOVE NUMBER & NOTATION (large, clear) ===
-        if move_data and not show_intro and not show_result:
-            if move_data.is_white_move:
-                move_text = f"{move_data.move_number}. {move_data.move_san}"
-            else:
-                move_text = f"{move_data.move_number}...{move_data.move_san}"
-            draw.text((VIDEO_WIDTH // 2, 1580), move_text,
-                      fill=COLORS['text_primary'], font=self.font_move, anchor="mm")
+        # (Removed in-video move notation text)
         
         # === INTRO OVERLAY ===
         if show_intro:
@@ -1095,6 +1088,11 @@ class ChessBeastVideoGenerator:
             rx = 18
             ry = i * square_size + square_size // 2
             draw.text((rx, ry), rank_char, fill=(80,80,80), font=self.font_small, anchor="mm")
+        # Draw notation in the four corners, small font
+        draw.text((10, size - 10), f"{files[0]}{ranks[0]}", fill=(80,80,80), font=self.font_tiny, anchor="ls")
+        draw.text((size - 10, size - 10), f"{files[7]}{ranks[0]}", fill=(80,80,80), font=self.font_tiny, anchor="rs")
+        draw.text((10, 10), f"{files[0]}{ranks[7]}", fill=(80,80,80), font=self.font_tiny, anchor="ld")
+        draw.text((size - 10, 10), f"{files[7]}{ranks[7]}", fill=(80,80,80), font=self.font_tiny, anchor="rd")
         
         # === DRAW MOVE ARROW ===
         if move_data:
