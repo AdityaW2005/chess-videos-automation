@@ -43,7 +43,7 @@ try:
 except ImportError:
     try:
         # Fallback for older moviepy versions
-        from moviepy.editor import VideoFileClip, AudioFileClip, CompositeAudioClip
+        from moviepy.editor import VideoFileClip, AudioFileClip, CompositeAudioClip # type: ignore
         MOVIEPY_AVAILABLE = True
     except ImportError:
         MOVIEPY_AVAILABLE = False
@@ -136,6 +136,9 @@ class GameData:
     white_player: str
     black_player: str
     termination: str  # How the game ended: checkmate, timeout, resignation, etc.
+    white_elo: str = "?"  # White player's Elo rating
+    black_elo: str = "?"  # Black player's Elo rating
+    time_control: str = "Blitz"  # Game time control type
     captured_by_white: List[str] = field(default_factory=list)  # Pieces captured by white
     captured_by_black: List[str] = field(default_factory=list)  # Pieces captured by black
 
@@ -215,6 +218,37 @@ class GameParser:
         black_player = game.headers.get("Black", "Unknown")
         result = game.headers.get("Result", "*")
         termination = game.headers.get("Termination", "")
+        
+        # Get Elo ratings
+        white_elo = game.headers.get("WhiteElo", "?")
+        black_elo = game.headers.get("BlackElo", "?")
+        
+        # Determine time control type from TimeControl header or Event
+        time_control_raw = game.headers.get("TimeControl", "")
+        event = game.headers.get("Event", "").lower()
+        
+        # Parse time control to determine game type
+        time_control = "Blitz"  # Default
+        if time_control_raw:
+            try:
+                # Format: "180" or "300+5" or "600"
+                base_time = int(time_control_raw.split("+")[0])
+                if base_time < 180:  # Less than 3 min
+                    time_control = "Bullet"
+                elif base_time <= 600:  # 3-10 min
+                    time_control = "Blitz"
+                else:  # More than 10 min
+                    time_control = "Rapid"
+            except:
+                pass
+        
+        # Override from Event header if present
+        if "bullet" in event:
+            time_control = "Bullet"
+        elif "rapid" in event:
+            time_control = "Rapid"
+        elif "blitz" in event:
+            time_control = "Blitz"
         
         # Get full opening name from ECOUrl or Opening header
         eco_url = game.headers.get("ECOUrl", "")
@@ -322,7 +356,7 @@ class GameParser:
             elif "resign" in term_lower:
                 win_reason = "Resignation"
             elif "abandon" in term_lower:
-                win_reason = "Abandoned"
+                win_reason = "Resignation"
             elif "stalemate" in term_lower:
                 win_reason = "Stalemate"
             elif "repetition" in term_lower:
@@ -341,6 +375,9 @@ class GameParser:
             white_player=white_player,
             black_player=black_player,
             termination=win_reason,
+            white_elo=white_elo,
+            black_elo=black_elo,
+            time_control=time_control,
             captured_by_white=captured_by_white,
             captured_by_black=captured_by_black
         )
@@ -428,32 +465,28 @@ class EvalBarRenderer:
 # =============================================================================
 
 class AudioManager:
-    """Manages sound effects and background music for chess videos."""
+    """Manages background Phonk music for chess videos."""
     
     def __init__(self):
-        self.available = MOVIEPY_AVAILABLE and SFX_DIR.exists()
+        self.available = MOVIEPY_AVAILABLE and MUSIC_DIR.exists()
         
-        # Sound effect paths
-        self.sfx = {
-            'move': SFX_DIR / "move.wav",
-            'capture': SFX_DIR / "capture.wav",
-            'check': SFX_DIR / "check.wav",
-            'checkmate': SFX_DIR / "checkmate.wav",
-            'victory': SFX_DIR / "victory.wav"
-        }
+        # Find all music files in the music directory
+        self.music_files = []
+        if MUSIC_DIR.exists():
+            for ext in ['*.mp3', '*.wav', '*.webm', '*.m4a', '*.ogg']:
+                self.music_files.extend(MUSIC_DIR.glob(ext))
         
-        # Music paths
-        self.music = {
-            'tension': MUSIC_DIR / "tension.wav",
-            'victory': MUSIC_DIR / "victory.wav"
-        }
-        
-        # Check what's available
-        self.has_sfx = all(p.exists() for p in self.sfx.values())
-        self.has_music = all(p.exists() for p in self.music.values())
+        self.has_music = len(self.music_files) > 0
         
         if self.available:
-            logger.info(f"🎵 Audio: SFX={'✅' if self.has_sfx else '❌'} | Music={'✅' if self.has_music else '❌'}")
+            logger.info(f"🎵 Audio: {len(self.music_files)} Phonk tracks available")
+    
+    def get_random_track(self) -> Optional[Path]:
+        """Get a random music track from the collection."""
+        if not self.music_files:
+            return None
+        import random
+        return random.choice(self.music_files)
     
     def add_audio_to_video(
         self,
@@ -463,85 +496,61 @@ class AudioManager:
         intro_frames: int,
         frames_per_move: int
     ) -> str:
-        """Add sound effects and music to video, return path to new video."""
-        if not self.available or not MOVIEPY_AVAILABLE:
-            logger.warning("⚠️ MoviePy not available, skipping audio")
+        """Add background Phonk music to video."""
+        if not self.available or not MOVIEPY_AVAILABLE or not self.has_music:
+            logger.warning("⚠️ No music available, skipping audio")
             return video_path
         
         try:
             # Load video
             video = VideoFileClip(video_path)
-            audio_clips = []
             
-            # Add background music (looped, lower volume)
-            if self.has_music and self.music['tension'].exists():
-                music = AudioFileClip(str(self.music['tension']))
-                # Loop if video is longer than music
-                if video.duration > music.duration:
-                    loops_needed = int(video.duration / music.duration) + 1
-                    music = music.with_effects([lambda c: c.loop(loops_needed)]) if hasattr(music, 'with_effects') else music.loop(loops_needed)
-                # Trim to video duration and reduce volume
-                music = music.with_end(video.duration).with_volume_scaled(0.25)
-                audio_clips.append(music)
-            
-            # Add sound effects for each move
-            if self.has_sfx:
-                for i, move_data in enumerate(moves):
-                    # Calculate start time for this move
-                    move_start_time = (intro_frames + i * frames_per_move) / fps
-                    
-                    # Select appropriate sound
-                    if move_data.is_checkmate:
-                        sfx_path = self.sfx['checkmate']
-                    elif move_data.is_check:
-                        sfx_path = self.sfx['check']
-                    elif move_data.is_capture:
-                        sfx_path = self.sfx['capture']
-                    else:
-                        sfx_path = self.sfx['move']
-                    
-                    # Add sound effect
-                    if sfx_path.exists():
-                        sfx = AudioFileClip(str(sfx_path)).with_volume_scaled(0.7)
-                        sfx = sfx.with_start(move_start_time)
-                        audio_clips.append(sfx)
-            
-            # Add victory sound at the end (2 seconds before end)
-            if self.has_sfx and self.sfx['victory'].exists():
-                victory_time = max(0, video.duration - 2.5)
-                victory = AudioFileClip(str(self.sfx['victory'])).with_volume_scaled(0.8)
-                victory = victory.with_start(victory_time)
-                audio_clips.append(victory)
-            
-            # Compose all audio
-            if audio_clips:
-                final_audio = CompositeAudioClip(audio_clips)
-                video_with_audio = video.with_audio(final_audio)
-                
-                # Output to new file
-                output_path = video_path.replace('.mp4', '_with_audio.mp4')
-                video_with_audio.write_videofile(
-                    output_path,
-                    codec='libx264',
-                    audio_codec='aac',
-                    logger=None,  # Suppress moviepy output
-                    fps=fps
-                )
-                
-                # Clean up
+            # Pick a random Phonk track
+            track = self.get_random_track()
+            if not track:
                 video.close()
-                video_with_audio.close()
-                for clip in audio_clips:
-                    clip.close()
-                
-                # Replace original with audio version
-                import shutil
-                shutil.move(output_path, video_path)
-                
-                logger.info("🎵 Audio added successfully")
                 return video_path
             
+            track_name = track.stem[:40]  # Truncate long names
+            logger.info(f"🎵 Using: {track_name}")
+            
+            # Load music
+            music = AudioFileClip(str(track))
+            
+            # If music is shorter than video, loop it
+            if video.duration > music.duration:
+                loops_needed = int(video.duration / music.duration) + 1
+                # Create looped audio by concatenating
+                from moviepy import concatenate_audioclips
+                music_clips = [AudioFileClip(str(track)) for _ in range(loops_needed)]
+                music = concatenate_audioclips(music_clips)
+            
+            # Trim to video duration and set volume (Phonk is usually loud, so 40%)
+            music = music.with_end(video.duration).with_volume_scaled(0.40)
+            
+            # Set as video audio
+            video_with_audio = video.with_audio(music)
+            
+            # Output to new file
+            output_path = video_path.replace('.mp4', '_with_audio.mp4')
+            video_with_audio.write_videofile(
+                output_path,
+                codec='libx264',
+                audio_codec='aac',
+                logger=None,
+                fps=fps
+            )
+            
+            # Clean up
             video.close()
+            video_with_audio.close()
+            music.close()
+            
+            # Replace original with audio version
+            import shutil
+            shutil.move(output_path, video_path)
+            
+            logger.info(f"🎵 Phonk added: {track_name}")
             return video_path
             
         except Exception as e:
@@ -663,26 +672,48 @@ class ChessBeastVideoGenerator:
             'Q': '♕', 'R': '♖', 'B': '♗', 'N': '♘', 'P': '♙'
         }
         
+        # Game counter for naming
+        self.game_number = self._get_next_game_number()
+        
         # Load fonts
         try:
             self.font_large = ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc", 48)
+            self.font_xlarge = ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc", 80)
             self.font_medium = ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc", 36)
             self.font_small = ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc", 28)
             self.font_move = ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc", 72)
             self.piece_font = ImageFont.truetype("/System/Library/Fonts/Apple Symbols.ttf", 100)
             self.capture_font = ImageFont.truetype("/System/Library/Fonts/Apple Symbols.ttf", 36)
+            self.font_game_title = ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc", 120)
         except:
             self.font_large = ImageFont.load_default()
+            self.font_xlarge = ImageFont.load_default()
             self.font_medium = ImageFont.load_default()
             self.font_small = ImageFont.load_default()
             self.font_move = ImageFont.load_default()
             self.piece_font = ImageFont.load_default()
             self.capture_font = ImageFont.load_default()
+            self.font_game_title = ImageFont.load_default()
         
-        logger.info(f"🎬 ChessBeast Video Generator v2 initialized")
+        logger.info(f"🎬 ChessBeast Video Generator initialized")
         logger.info(f"   Stockfish: {'✅' if self.stockfish.is_available() else '❌'}")
         logger.info(f"   Audio: {'✅' if self.audio_manager and self.audio_manager.available else '❌'}")
         logger.info(f"   Output: {self.output_dir}")
+    
+    def _get_next_game_number(self) -> int:
+        """Get the next game number based on existing videos."""
+        existing = list(self.output_dir.glob("Game_*.mp4"))
+        if not existing:
+            return 1
+        numbers = []
+        for f in existing:
+            try:
+                # Extract number from "Game_X.mp4"
+                num = int(f.stem.split('_')[1])
+                numbers.append(num)
+            except:
+                pass
+        return max(numbers, default=0) + 1
     
     def generate_video(
         self,
@@ -719,12 +750,12 @@ class ChessBeastVideoGenerator:
             logger.error("❌ No frames generated")
             return None
         
-        # Output path
+        # Output path - use Game_X naming
         if output_filename:
             video_path = self.output_dir / f"{output_filename}.mp4"
         else:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            video_path = self.output_dir / f"chess_short_{self.display_name.lower()}_{timestamp}.mp4"
+            video_path = self.output_dir / f"Game_{self.game_number}.mp4"
+            self.game_number += 1  # Increment for next video
         
         # Encode video
         self._encode_video(frames, str(video_path))
@@ -836,9 +867,15 @@ class ChessBeastVideoGenerator:
         # === OPPONENT BAR (top) - show what opponent captured (white pieces if we're white) ===
         if game_data.player_color == "white":
             opponent_captures = self.current_captured_black  # Black captured white pieces
+            opponent_name = game_data.black_player
+            opponent_elo = game_data.black_elo
+            opponent_piece_color = "black"
         else:
             opponent_captures = self.current_captured_white  # White captured black pieces (shown as white)
-        self._draw_player_bar(draw, "Opponent", is_top=True, is_player=False, captured=opponent_captures)
+            opponent_name = game_data.white_player
+            opponent_elo = game_data.white_elo
+            opponent_piece_color = "white"
+        self._draw_player_bar(draw, opponent_name, is_top=True, is_player=False, captured=opponent_captures, piece_color=opponent_piece_color)
         
         # === CHESS BOARD with ARROW ===
         board_img = self._render_board(board, board_size, move_data, flip_board)
@@ -847,9 +884,13 @@ class ChessBeastVideoGenerator:
         # === PLAYER BAR (bottom) - show what we captured ===
         if game_data.player_color == "white":
             player_captures = self.current_captured_white  # White captured black pieces
+            player_elo = game_data.white_elo
+            player_piece_color = "white"
         else:
             player_captures = self.current_captured_black  # Black captured white pieces (shown as black)
-        self._draw_player_bar(draw, self.display_name, is_top=False, is_player=True, captured=player_captures)
+            player_elo = game_data.black_elo
+            player_piece_color = "black"
+        self._draw_player_bar(draw, self.display_name, is_top=False, is_player=True, captured=player_captures, piece_color=player_piece_color)
         
         # === EVALUATION BAR ===
         if move_data:
@@ -870,17 +911,22 @@ class ChessBeastVideoGenerator:
         
         # === INTRO OVERLAY ===
         if show_intro:
-            # Semi-transparent overlay
-            overlay = Image.new('RGBA', (VIDEO_WIDTH, 200), (0, 0, 0, 200))
+            # Get game number from filename or use current
+            game_num = self.game_number
+            
+            # Semi-transparent overlay at top
+            overlay = Image.new('RGBA', (VIDEO_WIDTH, 300), (0, 0, 0, 200))
             frame_rgba = frame.convert('RGBA')
-            frame_rgba.paste(overlay, (0, VIDEO_HEIGHT // 2 - 100), overlay)
+            frame_rgba.paste(overlay, (0, 150), overlay)
             frame = frame_rgba.convert('RGB')
             draw = ImageDraw.Draw(frame)
             
-            draw.text((VIDEO_WIDTH // 2, VIDEO_HEIGHT // 2 - 30), "♟️ Chess Short",
-                      fill=COLORS['text_primary'], font=self.font_large, anchor="mm")
-            draw.text((VIDEO_WIDTH // 2, VIDEO_HEIGHT // 2 + 40), f"by {self.display_name}",
-                      fill=COLORS['text_secondary'], font=self.font_medium, anchor="mm")
+            # "Game X" in large text
+            draw.text((VIDEO_WIDTH // 2, 250), f"Game {game_num}",
+                      fill=COLORS['text_primary'], font=self.font_game_title, anchor="mm")
+            # "ChessBeast" below
+            draw.text((VIDEO_WIDTH // 2, 370), self.display_name,
+                      fill=COLORS['win_color'], font=self.font_xlarge, anchor="mm")
         
         # === RESULT OVERLAY (at end) ===
         if show_result:
@@ -889,29 +935,35 @@ class ChessBeastVideoGenerator:
             frame = Image.alpha_composite(frame.convert('RGBA'), overlay).convert('RGB')
             draw = ImageDraw.Draw(frame)
             
-            # Result badge
+            # Result badge - taller to fit two lines
             result_color = COLORS['win_color'] if game_data.player_won else COLORS['loss_color']
-            badge_y = VIDEO_HEIGHT // 2 - 80
+            badge_y = VIDEO_HEIGHT // 2 - 100
             
-            draw.rounded_rectangle([VIDEO_WIDTH // 2 - 200, badge_y - 60, 
-                                   VIDEO_WIDTH // 2 + 200, badge_y + 60],
+            draw.rounded_rectangle([VIDEO_WIDTH // 2 - 250, badge_y - 80, 
+                                   VIDEO_WIDTH // 2 + 250, badge_y + 80],
                                   radius=20, fill=result_color)
             
-            result_text = "VICTORY!" if game_data.player_won else "DEFEAT"
-            draw.text((VIDEO_WIDTH // 2, badge_y), result_text,
-                      fill=COLORS['text_primary'], font=self.font_large, anchor="mm")
+            # Two lines: "ChessBeast's" then "Victory"
+            if game_data.player_won:
+                draw.text((VIDEO_WIDTH // 2, badge_y - 25), f"{self.display_name}'s",
+                          fill=COLORS['text_primary'], font=self.font_large, anchor="mm")
+                draw.text((VIDEO_WIDTH // 2, badge_y + 35), "Victory!",
+                          fill=COLORS['text_primary'], font=self.font_large, anchor="mm")
+            else:
+                draw.text((VIDEO_WIDTH // 2, badge_y), "DEFEAT",
+                          fill=COLORS['text_primary'], font=self.font_large, anchor="mm")
             
             # Score (1-0, 0-1, etc.)
-            draw.text((VIDEO_WIDTH // 2, badge_y + 120), game_data.result,
+            draw.text((VIDEO_WIDTH // 2, badge_y + 140), game_data.result,
                       fill=COLORS['text_primary'], font=self.font_move, anchor="mm")
             
             # How the game ended (Checkmate, Timeout, etc.)
-            draw.text((VIDEO_WIDTH // 2, badge_y + 200), f"by {game_data.termination}",
+            draw.text((VIDEO_WIDTH // 2, badge_y + 210), f"by {game_data.termination}",
                       fill=COLORS['text_secondary'], font=self.font_medium, anchor="mm")
         
         return np.array(frame)[:, :, ::-1]  # RGB to BGR
     
-    def _draw_player_bar(self, draw: ImageDraw.Draw, name: str, is_top: bool, is_player: bool, captured: List[str] = None):
+    def _draw_player_bar(self, draw: ImageDraw.Draw, name: str, is_top: bool, is_player: bool, captured: List[str] = None, piece_color: str = "white"):
         """Draw player name bar with captured pieces."""
         if is_top:
             y = 140
@@ -922,12 +974,18 @@ class ChessBeastVideoGenerator:
         draw.rounded_rectangle([40, y, VIDEO_WIDTH - 120, y + 70], radius=10, 
                                fill=COLORS['player_bar_bg'])
         
-        # Player icon (circle)
+        # Player icon (circle) - color matches piece color with border
         icon_x = 70
-        icon_color = COLORS['win_color'] if is_player else COLORS['text_secondary']
+        # Draw border first (opposite color for visibility)
+        if piece_color == "white":
+            draw.ellipse([icon_x - 2, y + 13, icon_x + 42, y + 57], fill=(40, 40, 40))  # Black border
+            icon_color = (255, 255, 255)  # White
+        else:
+            draw.ellipse([icon_x - 2, y + 13, icon_x + 42, y + 57], fill=(255, 255, 255))  # White border
+            icon_color = (40, 40, 40)  # Black
         draw.ellipse([icon_x, y + 15, icon_x + 40, y + 55], fill=icon_color)
         
-        # Name (no rating shown)
+        # Name only (no Elo in player bar)
         name_x = icon_x + 60
         draw.text((name_x, y + 35), name, fill=COLORS['text_primary'], 
                   font=self.font_medium, anchor="lm")
@@ -1055,22 +1113,74 @@ class ChessBeastVideoGenerator:
         logger.info(f"💾 Size: {size_mb:.2f} MB | Duration: {duration:.1f}s")
     
     def _generate_thumbnail(self, game_data: GameData, output_path: str):
-        """Generate video thumbnail."""
+        """Generate video thumbnail with Game X and time control centered on board."""
         thumb = Image.new('RGB', (1280, 720), COLORS['background'])
         draw = ImageDraw.Draw(thumb)
         
-        # Green background for WIN
-        draw.rectangle([0, 0, 1280, 720], fill=(30, 60, 30))
+        # Draw chess board with pieces - full width
+        board_size = 720  # Full height
+        board_x = (1280 - board_size) // 2
+        board_y = 0
+        square_size = board_size // 8
         
-        # Title
-        draw.text((640, 200), "♟️ CHESS WIN", fill=COLORS['text_primary'], 
-                  font=self.font_large, anchor="mm")
-        draw.text((640, 300), game_data.result, fill=COLORS['win_color'],
-                  font=self.font_move, anchor="mm")
-        draw.text((640, 420), game_data.opening, fill=COLORS['text_secondary'],
-                  font=self.font_medium, anchor="mm")
-        draw.text((640, 520), f"by {self.display_name}", fill=COLORS['text_primary'],
-                  font=self.font_medium, anchor="mm")
+        # Create larger font for thumbnail pieces
+        try:
+            thumb_piece_font = ImageFont.truetype("/System/Library/Fonts/Apple Symbols.ttf", 70)
+        except:
+            thumb_piece_font = self.piece_font
+        
+        # Chess piece symbols for starting position
+        start_pieces = [
+            ['r', 'n', 'b', 'q', 'k', 'b', 'n', 'r'],
+            ['p', 'p', 'p', 'p', 'p', 'p', 'p', 'p'],
+            [None, None, None, None, None, None, None, None],
+            [None, None, None, None, None, None, None, None],
+            [None, None, None, None, None, None, None, None],
+            [None, None, None, None, None, None, None, None],
+            ['P', 'P', 'P', 'P', 'P', 'P', 'P', 'P'],
+            ['R', 'N', 'B', 'Q', 'K', 'B', 'N', 'R']
+        ]
+        piece_symbols = {
+            'P': '♙', 'N': '♘', 'B': '♗', 'R': '♖', 'Q': '♕', 'K': '♔',
+            'p': '♟', 'n': '♞', 'b': '♝', 'r': '♜', 'q': '♛', 'k': '♚'
+        }
+        
+        for row in range(8):
+            for col in range(8):
+                x = board_x + col * square_size
+                y = board_y + row * square_size
+                is_light = (row + col) % 2 == 0
+                color = (200, 177, 141) if is_light else (141, 96, 59)
+                draw.rectangle([x, y, x + square_size, y + square_size], fill=color)
+                
+                # Draw piece with larger font
+                piece = start_pieces[row][col]
+                if piece:
+                    symbol = piece_symbols.get(piece, '')
+                    piece_color = (255, 255, 255) if piece.isupper() else (40, 40, 40)
+                    draw.text((x + square_size // 2, y + square_size // 2), symbol,
+                              fill=piece_color, font=thumb_piece_font, anchor="mm")
+        
+        # Semi-transparent dark overlay in center of board for text
+        overlay = Image.new('RGBA', (1280, 720), (0, 0, 0, 0))
+        overlay_draw = ImageDraw.Draw(overlay)
+        overlay_draw.rounded_rectangle([board_x + 50, 280, board_x + board_size - 50, 440], 
+                                        radius=20, fill=(0, 0, 0, 200))
+        thumb = Image.alpha_composite(thumb.convert('RGBA'), overlay).convert('RGB')
+        draw = ImageDraw.Draw(thumb)
+        
+        # Extract game number
+        game_num = self.game_number - 1
+        if game_num < 1:
+            game_num = 1
+        
+        # "Game X" - centered on board
+        draw.text((640, 330), f"Game {game_num}",
+                  fill=COLORS['text_primary'], font=self.font_game_title, anchor="mm")
+        
+        # Time control below (Blitz/Bullet/Rapid)
+        draw.text((640, 400), game_data.time_control,
+                  fill=COLORS['win_color'], font=self.font_xlarge, anchor="mm")
         
         thumb.save(output_path, quality=95)
     
