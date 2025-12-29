@@ -346,17 +346,15 @@ class GameParser:
             ))
         
         # Parse termination reason
-        win_reason = "Game Over"
+        win_reason = None
         if termination:
             term_lower = termination.lower()
-            if "checkmate" in term_lower:
-                win_reason = "Checkmate"
-            elif "timeout" in term_lower:
+            if "timeout" in term_lower:
                 win_reason = "Timeout"
-            elif "resign" in term_lower:
+            elif "resign" in term_lower or "abandon" in term_lower:
                 win_reason = "Resignation"
-            elif "abandon" in term_lower:
-                win_reason = "Resignation"
+            elif "checkmate" in term_lower:
+                win_reason = "Checkmate"
             elif "stalemate" in term_lower:
                 win_reason = "Stalemate"
             elif "repetition" in term_lower:
@@ -365,6 +363,8 @@ class GameParser:
                 win_reason = "Insufficient Material"
             elif "agreement" in term_lower:
                 win_reason = "Draw by Agreement"
+        if not win_reason:
+            win_reason = "Unknown"
         
         return GameData(
             moves=moves_data,
@@ -1072,27 +1072,19 @@ class ChessBeastVideoGenerator:
                             draw.text((px + ox, py + oy), symbol, fill=outline_color, font=self.piece_font)
                         # Black piece fill
                         draw.text((px, py), symbol, fill=COLORS['black_piece'], font=self.piece_font)
-        # Draw notation (a-h, 1-8) from player's POV
+        # Draw a single small notation in the left (white) or right (black) bottom corner
         files = ['a','b','c','d','e','f','g','h']
         ranks = ['1','2','3','4','5','6','7','8']
         if flip:
             files = files[::-1]
             ranks = ranks[::-1]
-        # Draw files (bottom)
-        for i, file_char in enumerate(files):
-            fx = i * square_size + square_size // 2
-            fy = size - 28
-            draw.text((fx, fy), file_char, fill=(80,80,80), font=self.font_small, anchor="mm")
-        # Draw ranks (left)
-        for i, rank_char in enumerate(ranks[::-1]):
-            rx = 18
-            ry = i * square_size + square_size // 2
-            draw.text((rx, ry), rank_char, fill=(80,80,80), font=self.font_small, anchor="mm")
-        # Draw notation in the four corners, small font
-        draw.text((10, size - 10), f"{files[0]}{ranks[0]}", fill=(80,80,80), font=self.font_tiny, anchor="ls")
-        draw.text((size - 10, size - 10), f"{files[7]}{ranks[0]}", fill=(80,80,80), font=self.font_tiny, anchor="rs")
-        draw.text((10, 10), f"{files[0]}{ranks[7]}", fill=(80,80,80), font=self.font_tiny, anchor="ld")
-        draw.text((size - 10, 10), f"{files[7]}{ranks[7]}", fill=(80,80,80), font=self.font_tiny, anchor="rd")
+        notation = f"{files[0]}{ranks[0]}" if not flip else f"{files[7]}{ranks[0]}"
+        if not flip:
+            # White: bottom-left
+            draw.text((10, size - 10), notation, fill=(80,80,80), font=self.font_tiny, anchor="ls")
+        else:
+            # Black: bottom-right
+            draw.text((size - 10, size - 10), notation, fill=(80,80,80), font=self.font_tiny, anchor="rs")
         
         # === DRAW MOVE ARROW ===
         if move_data:
