@@ -8,12 +8,12 @@ Update these settings with your information
 # =============================================================================
 
 # Your Chess.com username (case-insensitive)
-CHESS_COM_USERNAME = "ChessBeast_37"  # TODO: Replace with your actual username
+CHESS_COM_USERNAME = "ChessBeast_37"
 
 # Game type filters
 GAME_TYPES = {
     "blitz": True,      # 3-10 minute games
-    "rapid": False,     # 10-30 minute games  
+    "rapid": False,     # 10-30 minute games
     "bullet": False,    # < 3 minute games
     "daily": False      # Correspondence games
 }

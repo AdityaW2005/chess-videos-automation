@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Enhanced Chess Video Generator - ChessBeast Edition
-====================================================
+=======================================================
 Customized video generation with:
 1. Evaluation bar for each move
 2. Move numbers clearly visible
@@ -9,6 +9,10 @@ Customized video generation with:
 4. "ChessBeast" as player name, "Opponent" for opponent
 5. No move quality labels
 6. Final result at end (1-0 or 0-1)
+7. Background music (dramatic tension)
+8. Sound effects (move, capture, check, checkmate)
+9. Move arrows showing piece movement
+10. Captured pieces display
 
 Author: ChessBeast Chess Shorts Automation
 """
@@ -17,10 +21,12 @@ import os
 import sys
 import logging
 import json
+import tempfile
+import math
 from pathlib import Path
 from datetime import datetime
-from typing import Optional, List
-from dataclasses import dataclass
+from typing import Optional, List, Dict, Tuple
+from dataclasses import dataclass, field
 
 import chess
 import chess.pgn
@@ -29,6 +35,18 @@ from PIL import Image, ImageDraw, ImageFont
 
 # Video processing
 import cv2
+
+# Audio processing
+try:
+    from moviepy import VideoFileClip, AudioFileClip, CompositeAudioClip, concatenate_audioclips
+    MOVIEPY_AVAILABLE = True
+except ImportError:
+    try:
+        # Fallback for older moviepy versions
+        from moviepy.editor import VideoFileClip, AudioFileClip, CompositeAudioClip
+        MOVIEPY_AVAILABLE = True
+    except ImportError:
+        MOVIEPY_AVAILABLE = False
 
 # Stockfish integration
 try:
@@ -47,6 +65,11 @@ STOCKFISH_PATH = "/opt/homebrew/bin/stockfish"
 VIDEO_WIDTH = 1080
 VIDEO_HEIGHT = 1920
 FPS = 30
+
+# Audio paths
+AUDIO_DIR = Path(__file__).parent / "audio"
+SFX_DIR = AUDIO_DIR / "sfx"
+MUSIC_DIR = AUDIO_DIR / "music"
 
 # Colors - Board stays same, pieces more bold
 COLORS = {
@@ -68,6 +91,8 @@ COLORS = {
     'black_piece': (30, 30, 30),           # Black pieces (slightly lighter)
     'white_outline': (60, 60, 60),         # Dark outline for white pieces (visibility)
     'black_outline': (0, 0, 0),            # Subtle outline for black pieces
+    'arrow_color': (255, 170, 0, 180),     # Orange arrow with transparency
+    'captured_bg': (35, 35, 35),           # Background for captured pieces
 }
 
 # =============================================================================
@@ -97,6 +122,8 @@ class MoveData:
     to_square: int
     is_check: bool
     is_checkmate: bool
+    is_capture: bool = False
+    captured_piece: Optional[str] = None
 
 @dataclass  
 class GameData:
@@ -109,6 +136,8 @@ class GameData:
     white_player: str
     black_player: str
     termination: str  # How the game ended: checkmate, timeout, resignation, etc.
+    captured_by_white: List[str] = field(default_factory=list)  # Pieces captured by white
+    captured_by_black: List[str] = field(default_factory=list)  # Pieces captured by black
 
 # =============================================================================
 # STOCKFISH ANALYZER (Simplified)
@@ -210,9 +239,14 @@ class GameParser:
         player_won = (result == "1-0" and player_color == "white") or \
                      (result == "0-1" and player_color == "black")
         
-        # Parse moves
+        # Parse moves and track captured pieces
         board = game.board()
         moves_data = []
+        captured_by_white = []  # Pieces white has captured (black pieces)
+        captured_by_black = []  # Pieces black has captured (white pieces)
+        
+        # Piece values for sorting captured pieces display
+        piece_order = {'q': 0, 'r': 1, 'b': 2, 'n': 3, 'p': 4}
         
         for i, move in enumerate(game.mainline_moves()):
             move_number = (i // 2) + 1
@@ -222,6 +256,26 @@ class GameParser:
             to_sq = move.to_square
             san = board.san(move)
             uci = move.uci()
+            
+            # Check for capture BEFORE making the move
+            is_capture = board.is_capture(move)
+            captured_piece = None
+            if is_capture:
+                # Get the piece being captured
+                target_piece = board.piece_at(to_sq)
+                if target_piece:
+                    captured_piece = target_piece.symbol().lower()
+                    if is_white_move:
+                        captured_by_white.append(captured_piece)
+                    else:
+                        captured_by_black.append(captured_piece.upper())
+                # Handle en passant
+                elif board.is_en_passant(move):
+                    captured_piece = 'p'
+                    if is_white_move:
+                        captured_by_white.append('p')
+                    else:
+                        captured_by_black.append('P')
             
             board.push(move)
             
@@ -252,7 +306,9 @@ class GameParser:
                 from_square=from_sq,
                 to_square=to_sq,
                 is_check=board.is_check(),
-                is_checkmate=board.is_checkmate()
+                is_checkmate=board.is_checkmate(),
+                is_capture=is_capture,
+                captured_piece=captured_piece
             ))
         
         # Parse termination reason
@@ -284,7 +340,9 @@ class GameParser:
             opening=opening[:35],
             white_player=white_player,
             black_player=black_player,
-            termination=win_reason
+            termination=win_reason,
+            captured_by_white=captured_by_white,
+            captured_by_black=captured_by_black
         )
 
 # =============================================================================
@@ -366,12 +424,195 @@ class EvalBarRenderer:
         return bar
 
 # =============================================================================
+# AUDIO MANAGER
+# =============================================================================
+
+class AudioManager:
+    """Manages sound effects and background music for chess videos."""
+    
+    def __init__(self):
+        self.available = MOVIEPY_AVAILABLE and SFX_DIR.exists()
+        
+        # Sound effect paths
+        self.sfx = {
+            'move': SFX_DIR / "move.wav",
+            'capture': SFX_DIR / "capture.wav",
+            'check': SFX_DIR / "check.wav",
+            'checkmate': SFX_DIR / "checkmate.wav",
+            'victory': SFX_DIR / "victory.wav"
+        }
+        
+        # Music paths
+        self.music = {
+            'tension': MUSIC_DIR / "tension.wav",
+            'victory': MUSIC_DIR / "victory.wav"
+        }
+        
+        # Check what's available
+        self.has_sfx = all(p.exists() for p in self.sfx.values())
+        self.has_music = all(p.exists() for p in self.music.values())
+        
+        if self.available:
+            logger.info(f"🎵 Audio: SFX={'✅' if self.has_sfx else '❌'} | Music={'✅' if self.has_music else '❌'}")
+    
+    def add_audio_to_video(
+        self,
+        video_path: str,
+        moves: List[MoveData],
+        fps: int,
+        intro_frames: int,
+        frames_per_move: int
+    ) -> str:
+        """Add sound effects and music to video, return path to new video."""
+        if not self.available or not MOVIEPY_AVAILABLE:
+            logger.warning("⚠️ MoviePy not available, skipping audio")
+            return video_path
+        
+        try:
+            # Load video
+            video = VideoFileClip(video_path)
+            audio_clips = []
+            
+            # Add background music (looped, lower volume)
+            if self.has_music and self.music['tension'].exists():
+                music = AudioFileClip(str(self.music['tension']))
+                # Loop if video is longer than music
+                if video.duration > music.duration:
+                    loops_needed = int(video.duration / music.duration) + 1
+                    music = music.with_effects([lambda c: c.loop(loops_needed)]) if hasattr(music, 'with_effects') else music.loop(loops_needed)
+                # Trim to video duration and reduce volume
+                music = music.with_end(video.duration).with_volume_scaled(0.25)
+                audio_clips.append(music)
+            
+            # Add sound effects for each move
+            if self.has_sfx:
+                for i, move_data in enumerate(moves):
+                    # Calculate start time for this move
+                    move_start_time = (intro_frames + i * frames_per_move) / fps
+                    
+                    # Select appropriate sound
+                    if move_data.is_checkmate:
+                        sfx_path = self.sfx['checkmate']
+                    elif move_data.is_check:
+                        sfx_path = self.sfx['check']
+                    elif move_data.is_capture:
+                        sfx_path = self.sfx['capture']
+                    else:
+                        sfx_path = self.sfx['move']
+                    
+                    # Add sound effect
+                    if sfx_path.exists():
+                        sfx = AudioFileClip(str(sfx_path)).with_volume_scaled(0.7)
+                        sfx = sfx.with_start(move_start_time)
+                        audio_clips.append(sfx)
+            
+            # Add victory sound at the end (2 seconds before end)
+            if self.has_sfx and self.sfx['victory'].exists():
+                victory_time = max(0, video.duration - 2.5)
+                victory = AudioFileClip(str(self.sfx['victory'])).with_volume_scaled(0.8)
+                victory = victory.with_start(victory_time)
+                audio_clips.append(victory)
+            
+            # Compose all audio
+            if audio_clips:
+                final_audio = CompositeAudioClip(audio_clips)
+                video_with_audio = video.with_audio(final_audio)
+                
+                # Output to new file
+                output_path = video_path.replace('.mp4', '_with_audio.mp4')
+                video_with_audio.write_videofile(
+                    output_path,
+                    codec='libx264',
+                    audio_codec='aac',
+                    logger=None,  # Suppress moviepy output
+                    fps=fps
+                )
+                
+                # Clean up
+                video.close()
+                video_with_audio.close()
+                for clip in audio_clips:
+                    clip.close()
+                
+                # Replace original with audio version
+                import shutil
+                shutil.move(output_path, video_path)
+                
+                logger.info("🎵 Audio added successfully")
+                return video_path
+            
+            video.close()
+            return video_path
+            
+        except Exception as e:
+            logger.warning(f"⚠️ Audio processing failed: {e}")
+            import traceback
+            traceback.print_exc()
+            return video_path
+
+# =============================================================================
+# ARROW RENDERER  
+# =============================================================================
+
+class ArrowRenderer:
+    """Renders move arrows on chess board."""
+    
+    @staticmethod
+    def draw_arrow(
+        draw: ImageDraw.Draw,
+        from_pos: Tuple[int, int],
+        to_pos: Tuple[int, int],
+        color: Tuple[int, int, int, int] = COLORS['arrow_color'],
+        width: int = 12
+    ):
+        """Draw an arrow from one position to another."""
+        x1, y1 = from_pos
+        x2, y2 = to_pos
+        
+        # Calculate arrow direction
+        dx = x2 - x1
+        dy = y2 - y1
+        length = math.sqrt(dx * dx + dy * dy)
+        
+        if length == 0:
+            return
+        
+        # Normalize direction
+        dx /= length
+        dy /= length
+        
+        # Arrow head size
+        head_length = 25
+        head_width = 18
+        
+        # Calculate points for arrow head
+        # Point where head starts on the line
+        head_base_x = x2 - dx * head_length
+        head_base_y = y2 - dy * head_length
+        
+        # Perpendicular direction
+        px = -dy
+        py = dx
+        
+        # Arrow head points
+        left_x = head_base_x + px * head_width
+        left_y = head_base_y + py * head_width
+        right_x = head_base_x - px * head_width
+        right_y = head_base_y - py * head_width
+        
+        # Draw arrow body (thick line)
+        draw.line([(x1, y1), (head_base_x, head_base_y)], fill=color[:3], width=width)
+        
+        # Draw arrow head (triangle)
+        draw.polygon([(x2, y2), (left_x, left_y), (right_x, right_y)], fill=color[:3])
+
+# =============================================================================
 # CHESSBEAST VIDEO GENERATOR
 # =============================================================================
 
 class ChessBeastVideoGenerator:
     """
-    Main video generator - ChessBeast Edition
+    Main video generator - ChessBeast Edition v2
     
     Features:
     - Evaluation bar with each move
@@ -381,6 +622,9 @@ class ChessBeastVideoGenerator:
     - "Opponent" for opponent (no rating)
     - No move quality labels
     - Final result at end
+    - Background music & sound effects
+    - Move arrows
+    - Captured pieces display
     """
     
     def __init__(
@@ -389,7 +633,8 @@ class ChessBeastVideoGenerator:
         display_name: str = "ChessBeast",
         output_dir: Path = Path("./videos"),
         enable_stockfish: bool = True,
-        stockfish_depth: int = 12
+        stockfish_depth: int = 12,
+        enable_audio: bool = True
     ):
         self.player_username = player_username.lower()
         self.display_name = display_name
@@ -403,9 +648,20 @@ class ChessBeastVideoGenerator:
         
         self.parser = GameParser(self.stockfish)
         self.eval_bar = EvalBarRenderer(width=50, height=850)
+        self.audio_manager = AudioManager() if enable_audio else None
         
         self.fps = FPS
         self.seconds_per_move = 1.2
+        
+        # Track captured pieces during rendering
+        self.current_captured_white = []  # Captured BY white (black pieces)
+        self.current_captured_black = []  # Captured BY black (white pieces)
+        
+        # Piece symbols for captured display
+        self.capture_symbols = {
+            'q': '♛', 'r': '♜', 'b': '♝', 'n': '♞', 'p': '♟',
+            'Q': '♕', 'R': '♖', 'B': '♗', 'N': '♘', 'P': '♙'
+        }
         
         # Load fonts
         try:
@@ -414,15 +670,18 @@ class ChessBeastVideoGenerator:
             self.font_small = ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc", 28)
             self.font_move = ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc", 72)
             self.piece_font = ImageFont.truetype("/System/Library/Fonts/Apple Symbols.ttf", 100)
+            self.capture_font = ImageFont.truetype("/System/Library/Fonts/Apple Symbols.ttf", 36)
         except:
             self.font_large = ImageFont.load_default()
             self.font_medium = ImageFont.load_default()
             self.font_small = ImageFont.load_default()
             self.font_move = ImageFont.load_default()
             self.piece_font = ImageFont.load_default()
+            self.capture_font = ImageFont.load_default()
         
-        logger.info(f"🎬 ChessBeast Video Generator initialized")
+        logger.info(f"🎬 ChessBeast Video Generator v2 initialized")
         logger.info(f"   Stockfish: {'✅' if self.stockfish.is_available() else '❌'}")
+        logger.info(f"   Audio: {'✅' if self.audio_manager and self.audio_manager.available else '❌'}")
         logger.info(f"   Output: {self.output_dir}")
     
     def generate_video(
@@ -449,8 +708,12 @@ class ChessBeastVideoGenerator:
         logger.info(f"✅ Game: {game_data.opening} - Result: {game_data.result}")
         logger.info(f"   Playing as: {game_data.player_color} | Won: {'Yes' if game_data.player_won else 'No'}")
         
+        # Reset captured pieces tracking
+        self.current_captured_white = []
+        self.current_captured_black = []
+        
         # Generate frames
-        frames = self._generate_frames(game_data, max_moves)
+        frames, frames_per_move = self._generate_frames(game_data, max_moves)
         
         if not frames:
             logger.error("❌ No frames generated")
@@ -466,6 +729,17 @@ class ChessBeastVideoGenerator:
         # Encode video
         self._encode_video(frames, str(video_path))
         
+        # Add audio (music + sound effects)
+        if self.audio_manager and self.audio_manager.available:
+            moves = game_data.moves[:max_moves] if max_moves else game_data.moves
+            self.audio_manager.add_audio_to_video(
+                str(video_path),
+                moves,
+                self.fps,
+                intro_frames=self.fps,  # 1 second intro
+                frames_per_move=frames_per_move
+            )
+        
         # Generate thumbnail
         thumbnail_path = video_path.with_suffix('.jpg')
         self._generate_thumbnail(game_data, str(thumbnail_path))
@@ -477,8 +751,8 @@ class ChessBeastVideoGenerator:
         logger.info(f"🖼️ Thumbnail: {thumbnail_path}")
         return str(video_path)
     
-    def _generate_frames(self, game_data: GameData, max_moves: Optional[int] = None) -> List[np.ndarray]:
-        """Generate all video frames."""
+    def _generate_frames(self, game_data: GameData, max_moves: Optional[int] = None) -> Tuple[List[np.ndarray], int]:
+        """Generate all video frames. Returns (frames, frames_per_move)."""
         frames = []
         board = chess.Board()
         
@@ -507,6 +781,13 @@ class ChessBeastVideoGenerator:
         # Move frames
         last_move_data = None
         for i, move_data in enumerate(moves):
+            # Track captures for display
+            if move_data.is_capture and move_data.captured_piece:
+                if move_data.is_white_move:
+                    self.current_captured_white.append(move_data.captured_piece)
+                else:
+                    self.current_captured_black.append(move_data.captured_piece.upper())
+            
             move = chess.Move.from_uci(move_data.move_uci)
             board.push(move)
             
@@ -524,7 +805,7 @@ class ChessBeastVideoGenerator:
             frame = self._render_frame(board, game_data, last_move_data, show_result=True)
             frames.append(frame)
         
-        return frames
+        return frames, frames_per_move
     
     def _render_frame(
         self,
@@ -552,15 +833,23 @@ class ChessBeastVideoGenerator:
         draw.text((VIDEO_WIDTH // 2, 60), game_data.opening, 
                   fill=COLORS['text_secondary'], font=self.font_medium, anchor="mm")
         
-        # === OPPONENT BAR (top) ===
-        self._draw_player_bar(draw, "Opponent", is_top=True, is_player=False)
+        # === OPPONENT BAR (top) - show what opponent captured (white pieces if we're white) ===
+        if game_data.player_color == "white":
+            opponent_captures = self.current_captured_black  # Black captured white pieces
+        else:
+            opponent_captures = self.current_captured_white  # White captured black pieces (shown as white)
+        self._draw_player_bar(draw, "Opponent", is_top=True, is_player=False, captured=opponent_captures)
         
-        # === CHESS BOARD ===
+        # === CHESS BOARD with ARROW ===
         board_img = self._render_board(board, board_size, move_data, flip_board)
         frame.paste(board_img, (board_x, board_y))
         
-        # === PLAYER BAR (bottom) ===
-        self._draw_player_bar(draw, self.display_name, is_top=False, is_player=True)
+        # === PLAYER BAR (bottom) - show what we captured ===
+        if game_data.player_color == "white":
+            player_captures = self.current_captured_white  # White captured black pieces
+        else:
+            player_captures = self.current_captured_black  # Black captured white pieces (shown as black)
+        self._draw_player_bar(draw, self.display_name, is_top=False, is_player=True, captured=player_captures)
         
         # === EVALUATION BAR ===
         if move_data:
@@ -622,8 +911,8 @@ class ChessBeastVideoGenerator:
         
         return np.array(frame)[:, :, ::-1]  # RGB to BGR
     
-    def _draw_player_bar(self, draw: ImageDraw.Draw, name: str, is_top: bool, is_player: bool):
-        """Draw player name bar."""
+    def _draw_player_bar(self, draw: ImageDraw.Draw, name: str, is_top: bool, is_player: bool, captured: List[str] = None):
+        """Draw player name bar with captured pieces."""
         if is_top:
             y = 140
         else:
@@ -642,6 +931,20 @@ class ChessBeastVideoGenerator:
         name_x = icon_x + 60
         draw.text((name_x, y + 35), name, fill=COLORS['text_primary'], 
                   font=self.font_medium, anchor="lm")
+        
+        # Draw captured pieces (right side of bar)
+        if captured:
+            # Sort by piece value (queens first)
+            piece_order = {'q': 0, 'Q': 0, 'r': 1, 'R': 1, 'b': 2, 'B': 2, 'n': 3, 'N': 3, 'p': 4, 'P': 4}
+            sorted_captures = sorted(captured, key=lambda x: piece_order.get(x, 5))
+            
+            # Draw captured pieces
+            cap_x = VIDEO_WIDTH - 180
+            for piece in sorted_captures[-8:]:  # Show last 8 max
+                symbol = self.capture_symbols.get(piece, piece)
+                draw.text((cap_x, y + 35), symbol, fill=COLORS['text_secondary'], 
+                         font=self.capture_font, anchor="mm")
+                cap_x -= 30
     
     def _render_board(
         self,
@@ -650,7 +953,7 @@ class ChessBeastVideoGenerator:
         move_data: Optional[MoveData],
         flip: bool = False
     ) -> Image.Image:
-        """Render chess board with bold pieces."""
+        """Render chess board with bold pieces and move arrow."""
         square_size = size // 8
         img = Image.new('RGB', (size, size))
         draw = ImageDraw.Draw(img)
@@ -713,6 +1016,27 @@ class ChessBeastVideoGenerator:
                             draw.text((px + ox, py + oy), symbol, fill=outline_color, font=self.piece_font)
                         # Black piece fill
                         draw.text((px, py), symbol, fill=COLORS['black_piece'], font=self.piece_font)
+        
+        # === DRAW MOVE ARROW ===
+        if move_data:
+            from_file = chess.square_file(move_data.from_square)
+            from_rank = chess.square_rank(move_data.from_square)
+            to_file = chess.square_file(move_data.to_square)
+            to_rank = chess.square_rank(move_data.to_square)
+            
+            # Convert to pixel coordinates (accounting for flip)
+            if flip:
+                from_x = (7 - from_file) * square_size + square_size // 2
+                from_y = from_rank * square_size + square_size // 2
+                to_x = (7 - to_file) * square_size + square_size // 2
+                to_y = to_rank * square_size + square_size // 2
+            else:
+                from_x = from_file * square_size + square_size // 2
+                from_y = (7 - from_rank) * square_size + square_size // 2
+                to_x = to_file * square_size + square_size // 2
+                to_y = (7 - to_rank) * square_size + square_size // 2
+            
+            ArrowRenderer.draw_arrow(draw, (from_x, from_y), (to_x, to_y))
         
         return img
     
