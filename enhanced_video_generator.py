@@ -64,9 +64,10 @@ COLORS = {
     'player_bar_bg': (45, 45, 45),
     'win_color': (76, 175, 80),            # Green
     'loss_color': (244, 67, 54),           # Red
-    'white_piece': (255, 255, 255),        # Bold white
-    'black_piece': (20, 20, 20),           # Bold black
-    'piece_outline': (0, 0, 0),            # Outline for contrast
+    'white_piece': (255, 255, 255),        # White pieces
+    'black_piece': (30, 30, 30),           # Black pieces (slightly lighter)
+    'white_outline': (60, 60, 60),         # Dark outline for white pieces (visibility)
+    'black_outline': (0, 0, 0),            # Subtle outline for black pieces
 }
 
 # =============================================================================
@@ -107,6 +108,7 @@ class GameData:
     opening: str
     white_player: str
     black_player: str
+    termination: str  # How the game ended: checkmate, timeout, resignation, etc.
 
 # =============================================================================
 # STOCKFISH ANALYZER (Simplified)
@@ -183,7 +185,25 @@ class GameParser:
         white_player = game.headers.get("White", "Unknown")
         black_player = game.headers.get("Black", "Unknown")
         result = game.headers.get("Result", "*")
-        opening = game.headers.get("Opening", game.headers.get("ECO", "Chess Game"))
+        termination = game.headers.get("Termination", "")
+        
+        # Get full opening name from ECOUrl or Opening header
+        eco_url = game.headers.get("ECOUrl", "")
+        if eco_url and "/openings/" in eco_url:
+            # Extract opening name from URL like "...openings/Benoni-Defense-3.e3..."
+            opening_part = eco_url.split("/openings/")[-1]
+            # Clean up: replace dashes with spaces, take main opening name
+            parts = opening_part.split("-")
+            # Take words until we hit a number (move notation)
+            opening_words = []
+            for p in parts:
+                if p and not p[0].isdigit():
+                    opening_words.append(p)
+                else:
+                    break
+            opening = " ".join(opening_words[:4])  # Max 4 words
+        else:
+            opening = game.headers.get("Opening", game.headers.get("ECO", "Chess Game"))
         
         # Determine player color and win status
         player_color = "white" if player_username.lower() in white_player.lower() else "black"
@@ -206,7 +226,22 @@ class GameParser:
             board.push(move)
             
             # Get evaluation after move
-            eval_after = self.stockfish.evaluate(board.fen()) if self.stockfish.is_available() else 0.0
+            # IMPORTANT: Stockfish returns eval from SIDE TO MOVE's perspective
+            # After white moves, it's black's turn, so we need to NEGATE to get white's perspective
+            # After black moves, it's white's turn, so eval is already from white's POV
+            raw_eval = self.stockfish.evaluate(board.fen()) if self.stockfish.is_available() else 0.0
+            
+            # Normalize to WHITE's perspective (positive = white winning)
+            # After white's move: board.turn is BLACK, so negate the eval
+            # After black's move: board.turn is WHITE, so keep as is
+            if board.turn == chess.BLACK:
+                # It's black's turn, meaning white just moved
+                # Stockfish gave eval from black's POV, so negate for white's POV
+                eval_after = -raw_eval
+            else:
+                # It's white's turn, meaning black just moved
+                # Stockfish gave eval from white's POV, so keep it
+                eval_after = raw_eval
             
             moves_data.append(MoveData(
                 move_number=move_number,
@@ -220,14 +255,36 @@ class GameParser:
                 is_checkmate=board.is_checkmate()
             ))
         
+        # Parse termination reason
+        win_reason = "Game Over"
+        if termination:
+            term_lower = termination.lower()
+            if "checkmate" in term_lower:
+                win_reason = "Checkmate"
+            elif "timeout" in term_lower:
+                win_reason = "Timeout"
+            elif "resign" in term_lower:
+                win_reason = "Resignation"
+            elif "abandon" in term_lower:
+                win_reason = "Abandoned"
+            elif "stalemate" in term_lower:
+                win_reason = "Stalemate"
+            elif "repetition" in term_lower:
+                win_reason = "Repetition"
+            elif "insufficient" in term_lower:
+                win_reason = "Insufficient Material"
+            elif "agreement" in term_lower:
+                win_reason = "Draw by Agreement"
+        
         return GameData(
             moves=moves_data,
             player_color=player_color,
             player_won=player_won,
             result=result,
-            opening=opening[:40],
+            opening=opening[:35],
             white_player=white_player,
-            black_player=black_player
+            black_player=black_player,
+            termination=win_reason
         )
 
 # =============================================================================
@@ -248,7 +305,13 @@ class EvalBarRenderer:
             self.font = ImageFont.load_default()
     
     def render(self, evaluation: float) -> Image.Image:
-        """Render evaluation bar. Positive = white winning (white at bottom)."""
+        """
+        Render evaluation bar like chess.com:
+        - BLACK section at TOP of bar
+        - WHITE section at BOTTOM of bar
+        - Positive eval (+3.0, M2) = WHITE is winning = WHITE section grows UP
+        - Negative eval (-3.0, -M2) = BLACK is winning = BLACK section grows DOWN
+        """
         bar = Image.new('RGBA', (self.width, self.height), (0, 0, 0, 0))
         draw = ImageDraw.Draw(bar)
         
@@ -256,33 +319,42 @@ class EvalBarRenderer:
         draw.rectangle([0, 0, self.width - 1, self.height - 1], 
                        outline=COLORS['eval_border'], width=2)
         
-        # Calculate split (0.5 = equal)
-        normalized = (evaluation / self.max_eval) / 2 + 0.5
-        normalized = max(0.03, min(0.97, normalized))
+        # Clamp evaluation to display range
+        clamped = max(-self.max_eval, min(self.max_eval, evaluation))
         
-        # Black at top when black is winning (normalized > 0.5)
-        # White at bottom when white is winning (normalized < 0.5)
-        black_height = int(self.height * (1 - normalized))
+        # Calculate where the dividing line is (as percentage from TOP)
+        # eval = +800 (white winning) → divider near TOP (black small at top, white big at bottom)
+        # eval = 0    → divider at 50% (middle)
+        # eval = -800 (black winning) → divider near BOTTOM (black big at top, white small at bottom)
         
-        # Draw black portion (top)
-        draw.rectangle([3, 3, self.width - 4, black_height], fill=COLORS['eval_black'])
+        # black_portion = how much of bar is black (from top)
+        # When white winning (+), black_portion should be SMALL
+        # When black winning (-), black_portion should be LARGE
+        black_portion = 0.5 - (clamped / (2 * self.max_eval))
+        black_portion = max(0.05, min(0.95, black_portion))
         
-        # Draw white portion (bottom)
-        draw.rectangle([3, black_height, self.width - 4, self.height - 4], fill=COLORS['eval_white'])
+        # Calculate the Y coordinate where black ends and white begins
+        divider_y = int(self.height * black_portion)
+        
+        # Draw BLACK section (TOP - from top to divider)
+        draw.rectangle([3, 3, self.width - 4, divider_y], fill=COLORS['eval_black'])
+        
+        # Draw WHITE section (BOTTOM - from divider to bottom)
+        draw.rectangle([3, divider_y, self.width - 4, self.height - 4], fill=COLORS['eval_white'])
         
         # Evaluation text
         if abs(evaluation) >= 9000:
-            mate_in = int((10000 - abs(evaluation)) / 10)
+            mate_in = max(1, int((10000 - abs(evaluation)) / 10))
             eval_text = f"M{mate_in}" if evaluation > 0 else f"-M{mate_in}"
         else:
             eval_text = f"{evaluation/100:+.1f}"
         
-        # Position text in the larger section
+        # Position text in the LARGER section for readability
         bbox = draw.textbbox((0, 0), eval_text, font=self.font)
         text_width = bbox[2] - bbox[0]
         text_x = (self.width - text_width) // 2
         
-        if normalized > 0.5:  # White winning - text on white (bottom)
+        if evaluation >= 0:  # White winning or equal - text on white (bottom)
             text_y = self.height - 30
             text_color = COLORS['eval_black']
         else:  # Black winning - text on black (top)
@@ -414,11 +486,16 @@ class ChessBeastVideoGenerator:
         if max_moves:
             moves = moves[:max_moves]
         
-        # Limit to ~57 seconds (leave 2s for intro/outro)
-        max_possible = int((57 - 3) / self.seconds_per_move)
-        if len(moves) > max_possible:
-            moves = moves[:max_possible]
-            logger.info(f"📋 Limited to {len(moves)} moves for 59s video")
+        # Adjust seconds per move to fit full game in ~57 seconds
+        total_moves = len(moves)
+        available_time = 57 - 3  # Leave 3s for intro/outro
+        
+        if total_moves * self.seconds_per_move > available_time:
+            # Speed up to fit all moves
+            self.seconds_per_move = available_time / total_moves
+            logger.info(f"📋 Showing all {total_moves} moves (speed: {self.seconds_per_move:.2f}s per move)")
+        else:
+            logger.info(f"📋 Showing all {total_moves} moves")
         
         frames_per_move = int(self.fps * self.seconds_per_move)
         
@@ -539,14 +616,8 @@ class ChessBeastVideoGenerator:
             draw.text((VIDEO_WIDTH // 2, badge_y + 120), game_data.result,
                       fill=COLORS['text_primary'], font=self.font_move, anchor="mm")
             
-            # Who wins description
-            if game_data.result == "1-0":
-                winner_text = "White wins"
-            elif game_data.result == "0-1":
-                winner_text = "Black wins"
-            else:
-                winner_text = "Draw"
-            draw.text((VIDEO_WIDTH // 2, badge_y + 200), winner_text,
+            # How the game ended (Checkmate, Timeout, etc.)
+            draw.text((VIDEO_WIDTH // 2, badge_y + 200), f"by {game_data.termination}",
                       fill=COLORS['text_secondary'], font=self.font_medium, anchor="mm")
         
         return np.array(frame)[:, :, ::-1]  # RGB to BGR
@@ -619,7 +690,7 @@ class ChessBeastVideoGenerator:
                 
                 draw.rectangle([x, y, x + square_size, y + square_size], fill=color)
                 
-                # Draw piece with BOLD styling
+                # Draw piece
                 piece = board.piece_at(square)
                 if piece:
                     symbol = piece_symbols.get(piece.symbol(), '')
@@ -628,14 +699,20 @@ class ChessBeastVideoGenerator:
                     px = x + (square_size - tw) // 2
                     py = y + (square_size - th) // 2 - 10
                     
-                    # Bold outline for maximum contrast
-                    outline_color = COLORS['piece_outline']
-                    for ox, oy in [(-2, 0), (2, 0), (0, -2), (0, 2), (-2, -2), (2, 2), (-2, 2), (2, -2)]:
-                        draw.text((px + ox, py + oy), symbol, fill=outline_color, font=self.piece_font)
-                    
-                    # Main piece color - BOLD white/black
-                    piece_color = COLORS['white_piece'] if piece.color else COLORS['black_piece']
-                    draw.text((px, py), symbol, fill=piece_color, font=self.piece_font)
+                    if piece.color:  # White pieces
+                        # Dark outline for white pieces (makes them visible on light squares)
+                        outline_color = COLORS['white_outline']
+                        for ox, oy in [(-2, 0), (2, 0), (0, -2), (0, 2)]:
+                            draw.text((px + ox, py + oy), symbol, fill=outline_color, font=self.piece_font)
+                        # White piece fill
+                        draw.text((px, py), symbol, fill=COLORS['white_piece'], font=self.piece_font)
+                    else:  # Black pieces
+                        # Very subtle outline for black pieces
+                        outline_color = COLORS['black_outline']
+                        for ox, oy in [(-1, 0), (1, 0)]:
+                            draw.text((px + ox, py + oy), symbol, fill=outline_color, font=self.piece_font)
+                        # Black piece fill
+                        draw.text((px, py), symbol, fill=COLORS['black_piece'], font=self.piece_font)
         
         return img
     
