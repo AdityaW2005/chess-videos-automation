@@ -443,18 +443,15 @@ class DailyAutomation:
         scored_games.sort(key=lambda x: x[0], reverse=True)
         top_games = [g for _, g in scored_games[:3]]
 
-        # Schedule times: 5 PM, 6 PM, 7 PM IST
-        publish_times = [(17, 0), (18, 0), (19, 0)]
+        # All videos at 6 PM IST, in Game X order
+        publish_time = self.uploader.get_scheduled_publish_time(18, 0)
         video_ids = []
-        for idx, (game, (hour, minute)) in enumerate(zip(top_games, publish_times), 1):
+        for idx, game in enumerate(top_games, 1):
             logger.info(f"\n=== Processing Game {idx} ===")
-            # Generate video with correct game number
             video_path = self.generate_video_with_number(game, idx)
             if not video_path:
                 logger.error(f"❌ Video generation failed for Game {idx}")
                 continue
-            # Schedule upload
-            publish_time = self.uploader.get_scheduled_publish_time(hour, minute)
             video_id = self.upload_video_with_time(video_path, game, idx, publish_time)
             if video_id:
                 video_ids.append(video_id)

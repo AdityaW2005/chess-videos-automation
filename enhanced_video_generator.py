@@ -860,11 +860,15 @@ class ChessBeastVideoGenerator:
         # Flip board if player is black
         flip_board = game_data.player_color == "black"
         
-        # === HEADER: Opening name ===
-        draw.text((VIDEO_WIDTH // 2, 60), game_data.opening, 
+        # === HEADER: Game title (above opponent name) ===
+        draw.text((VIDEO_WIDTH // 2, 60), f"Game {self.game_number} in Blitz", 
+                  fill=COLORS['text_primary'], font=self.font_game_title, anchor="mm")
+        # Opening name below title
+        draw.text((VIDEO_WIDTH // 2, 130), game_data.opening, 
                   fill=COLORS['text_secondary'], font=self.font_medium, anchor="mm")
-        
         # === OPPONENT BAR (top) - show what opponent captured (white pieces if we're white) ===
+        # Make opponent bar same distance from board as player bar
+        opponent_bar_y = board_y - 110  # 110 px above board
         if game_data.player_color == "white":
             opponent_captures = self.current_captured_black  # Black captured white pieces
             opponent_name = game_data.black_player
@@ -875,13 +879,14 @@ class ChessBeastVideoGenerator:
             opponent_name = game_data.white_player
             opponent_elo = game_data.white_elo
             opponent_piece_color = "white"
-        self._draw_player_bar(draw, opponent_name, is_top=True, is_player=False, captured=opponent_captures, piece_color=opponent_piece_color)
+        self._draw_player_bar(draw, opponent_name, is_top=True, is_player=False, captured=opponent_captures, piece_color=opponent_piece_color, custom_y=opponent_bar_y)
         
         # === CHESS BOARD with ARROW ===
         board_img = self._render_board(board, board_size, move_data, flip_board)
         frame.paste(board_img, (board_x, board_y))
         
         # === PLAYER BAR (bottom) - show what we captured ===
+        player_bar_y = board_y + board_size + 40  # 40 px below board
         if game_data.player_color == "white":
             player_captures = self.current_captured_white  # White captured black pieces
             player_elo = game_data.white_elo
@@ -890,7 +895,7 @@ class ChessBeastVideoGenerator:
             player_captures = self.current_captured_black  # Black captured white pieces (shown as black)
             player_elo = game_data.black_elo
             player_piece_color = "black"
-        self._draw_player_bar(draw, self.display_name, is_top=False, is_player=True, captured=player_captures, piece_color=player_piece_color)
+        self._draw_player_bar(draw, self.display_name, is_top=False, is_player=True, captured=player_captures, piece_color=player_piece_color, custom_y=player_bar_y)
         
         # === EVALUATION BAR ===
         if move_data:
@@ -963,12 +968,12 @@ class ChessBeastVideoGenerator:
         
         return np.array(frame)[:, :, ::-1]  # RGB to BGR
     
-    def _draw_player_bar(self, draw: ImageDraw.Draw, name: str, is_top: bool, is_player: bool, captured: List[str] = None, piece_color: str = "white"):
-        """Draw player name bar with captured pieces."""
-        if is_top:
-            y = 140
+    def _draw_player_bar(self, draw: ImageDraw.Draw, name: str, is_top: bool, is_player: bool, captured: List[str] = None, piece_color: str = "white", custom_y: int = None):
+        """Draw player name bar with captured pieces. Accepts custom_y for precise placement."""
+        if custom_y is not None:
+            y = custom_y
         else:
-            y = 1420
+            y = 140 if is_top else 1420
         
         # Background
         draw.rounded_rectangle([40, y, VIDEO_WIDTH - 120, y + 70], radius=10, 
@@ -1074,6 +1079,22 @@ class ChessBeastVideoGenerator:
                             draw.text((px + ox, py + oy), symbol, fill=outline_color, font=self.piece_font)
                         # Black piece fill
                         draw.text((px, py), symbol, fill=COLORS['black_piece'], font=self.piece_font)
+        # Draw notation (a-h, 1-8) from player's POV
+        files = ['a','b','c','d','e','f','g','h']
+        ranks = ['1','2','3','4','5','6','7','8']
+        if flip:
+            files = files[::-1]
+            ranks = ranks[::-1]
+        # Draw files (bottom)
+        for i, file_char in enumerate(files):
+            fx = i * square_size + square_size // 2
+            fy = size - 28
+            draw.text((fx, fy), file_char, fill=(80,80,80), font=self.font_small, anchor="mm")
+        # Draw ranks (left)
+        for i, rank_char in enumerate(ranks[::-1]):
+            rx = 18
+            ry = i * square_size + square_size // 2
+            draw.text((rx, ry), rank_char, fill=(80,80,80), font=self.font_small, anchor="mm")
         
         # === DRAW MOVE ARROW ===
         if move_data:
