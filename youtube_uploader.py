@@ -331,36 +331,9 @@ class MetadataGenerator:
     """Generates engaging titles and descriptions for chess videos."""
     
     # Title templates based on game outcome
-    TITLE_TEMPLATES_WIN = [
-        "♟️ {opening} - Crushing Win vs {rating}!",
-        "🔥 {rating} Rated Player DESTROYED | {opening}",
-        "Chess Blitz WIN: {opening} 🏆",
-        "I Beat a {rating}! | {opening} Blitz",
-        "⚡ {opening} Masterclass vs {rating}",
-    ]
-    
-    TITLE_TEMPLATES_LOSS = [
-        "♟️ Learning from Defeat: {opening}",
-        "Where Did I Go Wrong? | {opening} Analysis",
-        "Chess Blitz vs {rating} - Close Game!",
-        "💡 Instructive Loss: {opening}",
-    ]
-    
-    DESCRIPTION_TEMPLATE = """
-{emoji} {result_text} in {time_control} Blitz on Chess.com!
-
-🎮 Opening: {opening}
-⚔️ Opponent: {opponent} ({opponent_rating})
-👤 My Rating: {my_rating}
-
-{game_summary}
-
-📺 Subscribe for daily chess content!
-
-#Chess #ChessShorts #Blitz #ChessCom {hashtags}
-
-🔗 Play me on Chess.com: https://www.chess.com/member/{username}
-"""
+    # Title and description templates for new requirements
+    TITLE_TEMPLATE = "Game {game_number} in Blitz"
+    DESCRIPTION_TEMPLATE = "Opening: {opening}"
     
     HASHTAGS = [
         "#ChessOpening", "#ChessStrategy", "#ChessTactics",
@@ -374,12 +347,7 @@ class MetadataGenerator:
     def generate(
         self,
         opening: str,
-        opponent_name: str,
-        opponent_rating: int,
-        player_rating: int,
-        player_won: bool,
-        time_control: str,
-        player_color: str
+        game_number: int
     ) -> VideoMetadata:
         """
         Generate video metadata from game information.
@@ -387,61 +355,13 @@ class MetadataGenerator:
         Returns:
             VideoMetadata object ready for upload
         """
-        import random
-        
-        # Select appropriate title template
-        if player_won:
-            template = random.choice(self.TITLE_TEMPLATES_WIN)
-            emoji = "🏆"
-            result_text = "WIN"
-        else:
-            template = random.choice(self.TITLE_TEMPLATES_LOSS)
-            emoji = "📚"
-            result_text = "Educational Loss"
-        
-        # Generate title
-        title = template.format(
-            opening=opening[:30] if len(opening) > 30 else opening,
-            rating=opponent_rating
-        )
-        
-        # Generate game summary
-        rating_diff = opponent_rating - player_rating
-        if rating_diff > 100:
-            game_summary = f"Faced a higher-rated opponent (+{rating_diff} rating difference)!"
-        elif rating_diff < -100:
-            game_summary = f"Expected win against lower-rated opponent."
-        else:
-            game_summary = "Evenly matched game with exciting tactics!"
-        
-        # Add color info
-        game_summary += f" Playing as {'White' if player_color == 'white' else 'Black'}."
-        
-        # Select random hashtags
-        extra_hashtags = " ".join(random.sample(self.HASHTAGS, 3))
-        
-        # Generate description
-        description = self.DESCRIPTION_TEMPLATE.format(
-            emoji=emoji,
-            result_text=result_text,
-            time_control=time_control,
-            opening=opening,
-            opponent=opponent_name,
-            opponent_rating=opponent_rating,
-            my_rating=player_rating,
-            game_summary=game_summary,
-            username=self.username,
-            hashtags=extra_hashtags
-        )
-        
-        # Generate tags
+        # Title: Game X in Blitz
+        title = self.TITLE_TEMPLATE.format(game_number=game_number)
+        # Description: Opening: [Opening Name]
+        description = self.DESCRIPTION_TEMPLATE.format(opening=opening)
         tags = [
-            "chess", "chess shorts", "blitz chess", "chess.com",
-            "chess opening", opening.lower().replace(" ", ""),
-            "chess game", "online chess", "chess tactics",
-            self.username.lower(), "chess tutorial"
+            "chess", "chess shorts", "blitz chess", "chess opening", opening.lower().replace(" ", ""), "chess game", "online chess", "chess tactics", self.username.lower(), "chess tutorial"
         ]
-        
         return VideoMetadata(
             title=title,
             description=description,

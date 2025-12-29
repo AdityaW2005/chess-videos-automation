@@ -407,54 +407,163 @@ class DailyAutomation:
             return None
     
     def run(self) -> bool:
-        """Run the full daily automation pipeline."""
-        logger.info("🚀 Starting Daily Chess Shorts Automation")
+        """Run the full daily automation pipeline for 3 winning games per day."""
+        logger.info("🚀 Starting Daily Chess Shorts Automation (3 shorts per day)")
         logger.info(f"⏰ Time: {datetime.now(self.tz).strftime('%Y-%m-%d %H:%M:%S %Z')}")
-        
+
         if self.dry_run:
             logger.info("🔸 DRY RUN MODE - No uploads will be made")
-        
-        # Phase 1: Fetch games
+
+        # Phase 1: Fetch games (today, then fallback to previous day if needed)
+        today = datetime.now(self.tz).date()
         games = self.fetch_todays_games()
-        
         if not games:
-            logger.warning("⚠️ No games found for today. Exiting.")
+            # Try previous day
+            prev_day = today - timedelta(days=1)
+            logger.warning("⚠️ No games found for today, trying previous day...")
+            games = self._fetch_games_for_date(prev_day)
+            if not games:
+                logger.error("❌ No games found for today or previous day. Exiting.")
+                return False
+
+        # Filter to wins only
+        winning_games = [g for g in games if g.get('player_won')]
+        if len(winning_games) < 3:
+            # Try to supplement with previous day's wins if not enough
+            prev_day = today - timedelta(days=1)
+            prev_games = self._fetch_games_for_date(prev_day)
+            prev_wins = [g for g in prev_games if g.get('player_won')] if prev_games else []
+            winning_games += prev_wins
+        if not winning_games:
+            logger.error("❌ No winning games found for today or previous day. Exiting.")
             return False
-        
-        # Select best game
-        best_game = self.selector.select_best(games)
-        
-        if not best_game:
-            logger.warning("⚠️ Could not select a game. Exiting.")
+
+        # Select up to 3 best wins
+        scored_games = [(self.selector.score_game(g), g) for g in winning_games]
+        scored_games.sort(key=lambda x: x[0], reverse=True)
+        top_games = [g for _, g in scored_games[:3]]
+
+        # Schedule times: 5 PM, 6 PM, 7 PM IST
+        publish_times = [(17, 0), (18, 0), (19, 0)]
+        video_ids = []
+        for idx, (game, (hour, minute)) in enumerate(zip(top_games, publish_times), 1):
+            logger.info(f"\n=== Processing Game {idx} ===")
+            # Generate video with correct game number
+            video_path = self.generate_video_with_number(game, idx)
+            if not video_path:
+                logger.error(f"❌ Video generation failed for Game {idx}")
+                continue
+            # Schedule upload
+            publish_time = self.uploader.get_scheduled_publish_time(hour, minute)
+            video_id = self.upload_video_with_time(video_path, game, idx, publish_time)
+            if video_id:
+                video_ids.append(video_id)
+        if not video_ids:
+            logger.error("❌ No videos uploaded.")
             return False
-        
-        # Phase 2: Generate video
-        video_path = self.generate_video(best_game)
-        
-        if not video_path:
-            logger.error("❌ Video generation failed. Exiting.")
-            return False
-        
-        # Phase 3: Upload to YouTube
-        video_id = self.upload_video(video_path, best_game)
-        
-        if not video_id:
-            logger.error("❌ Upload failed. Exiting.")
-            return False
-        
-        # Success!
         logger.info("=" * 60)
-        logger.info("✅ DAILY AUTOMATION COMPLETE!")
-        logger.info("=" * 60)
-        logger.info(f"📊 Stats:")
-        logger.info(f"   Games fetched: {self.stats['games_fetched']}")
-        logger.info(f"   Games filtered: {self.stats['games_filtered']}")
-        logger.info(f"   Video generated: {'✅' if self.stats['video_generated'] else '❌'}")
-        logger.info(f"   Video uploaded: {'✅' if self.stats['video_uploaded'] else '❌'}")
-        if self.stats['video_id']:
-            logger.info(f"   Video URL: https://youtube.com/shorts/{self.stats['video_id']}")
-        
+        logger.info("✅ DAILY AUTOMATION COMPLETE! Uploaded videos:")
+        for i, vid in enumerate(video_ids, 1):
+            logger.info(f"   Game {i}: https://youtube.com/shorts/{vid}")
         return True
+
+    def _fetch_games_for_date(self, date_obj):
+        """Fetch and filter games for a specific date."""
+        year, month = date_obj.year, date_obj.month
+        try:
+            games = self.api.get_monthly_games(year, month)
+        except Exception as e:
+            logger.error(f"❌ Failed to fetch games for {date_obj}: {e}")
+            return []
+        filtered = []
+        for game in games:
+            parsed = self.parser.parse_game(game)
+            if parsed:
+                game_date = parsed.end_time.date() if parsed.end_time else None
+                if game_date == date_obj and parsed.time_class == 'blitz':
+                    filtered.append(self._game_to_dict(parsed, game))
+        return filtered
+
+    def generate_video_with_number(self, game: Dict[str, Any], game_number: int) -> Optional[Path]:
+        """Generate video from a game, passing game_number for title/thumbnail."""
+        logger.info(f"🎬 Generating Video for Game {game_number}")
+        today = datetime.now(self.tz).date()
+        date_str = today.strftime('%Y-%m-%d')
+        pgn_dir = Path(PGN_OUTPUT_DIR) / date_str
+        pgn_dir.mkdir(parents=True, exist_ok=True)
+        opponent = game.get('white_player') if game.get('player_color') == 'black' else game.get('black_player')
+        pgn_files = list(pgn_dir.glob(f"*{opponent}*.pgn"))
+        if not pgn_files:
+            pgn_file = pgn_dir / f"game_{opponent}_{game.get('num_moves', 0)}moves.pgn"
+            if 'pgn' in game:
+                with open(pgn_file, 'w') as f:
+                    f.write(game['pgn'])
+                pgn_files = [pgn_file]
+            else:
+                logger.error("❌ No PGN data available for this game")
+                return None
+        pgn_file = pgn_files[0]
+        output_dir = Path(VIDEO_OUTPUT_DIR) / date_str
+        output_dir.mkdir(parents=True, exist_ok=True)
+        video_name = f"Game_{game_number}"
+        try:
+            if self.use_enhanced:
+                self.video_generator.output_dir = output_dir
+                # Pass game_number to generator if supported
+                if hasattr(self.video_generator, 'game_number'):
+                    self.video_generator.game_number = game_number
+                result_path = self.video_generator.generate_video(
+                    pgn_path=str(pgn_file),
+                    output_filename=video_name
+                )
+                thumbnail_path = Path(result_path).with_suffix('.jpg') if result_path else None
+                if thumbnail_path and thumbnail_path.exists():
+                    logger.info(f"🖼️ Thumbnail: {thumbnail_path.name}")
+            else:
+                self.video_generator.output_dir = output_dir
+                result_path = self.video_generator.generate_video(
+                    pgn_path=str(pgn_file),
+                    output_filename=video_name
+                )
+            if result_path and Path(result_path).exists():
+                logger.info(f"✅ Video generated: {result_path}")
+                json_path = Path(result_path).with_suffix('.json')
+                with open(json_path, 'w') as f:
+                    json.dump(game, f, indent=2, default=str)
+                return Path(result_path)
+            else:
+                logger.error("❌ Video generation failed")
+                return None
+        except Exception as e:
+            logger.error(f"❌ Video generation error: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+
+    def upload_video_with_time(self, video_path: Path, game: Dict[str, Any], game_number: int, publish_time) -> Optional[str]:
+        """Upload video to YouTube with custom title/description and scheduled time."""
+        logger.info(f"📤 Uploading Game {game_number} to YouTube (scheduled at {publish_time.strftime('%Y-%m-%d %H:%M %Z')})")
+        if self.dry_run:
+            logger.info("🔸 DRY RUN - Skipping upload")
+            return f"DRY_RUN_VIDEO_ID_{game_number}"
+        # Use new metadata generator
+        metadata = self.uploader.metadata_generator.generate(
+            opening=game.get('opening', 'Unknown Opening'),
+            game_number=game_number
+        )
+        metadata.publish_at = publish_time
+        video_id = self.uploader.upload_video(
+            video_path=str(video_path),
+            metadata=metadata,
+            notify_subscribers=False
+        )
+        if video_id:
+            logger.info(f"✅ Upload successful! Video ID: {video_id}")
+            logger.info(f"   URL: https://youtube.com/shorts/{video_id}")
+            return video_id
+        else:
+            logger.error("❌ Upload failed")
+            return None
     
     def fetch_only(self) -> bool:
         """Only fetch and save games."""
