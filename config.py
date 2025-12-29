@@ -48,6 +48,9 @@ VIDEO_SETTINGS = {
     "aspect_ratio": "9:16"
 }
 
+# Display name shown in videos (your brand name)
+DISPLAY_NAME = "ChessBeast"
+
 # =============================================================================
 # SCHEDULING CONFIGURATION
 # =============================================================================
