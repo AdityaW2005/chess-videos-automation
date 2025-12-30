@@ -682,7 +682,7 @@ class ChessBeastVideoGenerator:
             self.font_medium = ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc", 36)
             self.font_small = ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc", 28)
             self.font_tiny = ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc", 18)
-            self.font_move = ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc", 72)
+            self.font_move = ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc", 32)
             self.piece_font = ImageFont.truetype("/System/Library/Fonts/Apple Symbols.ttf", 100)
             self.capture_font = ImageFont.truetype("/System/Library/Fonts/Apple Symbols.ttf", 36)
             self.font_game_title = ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc", 120)
@@ -691,6 +691,7 @@ class ChessBeastVideoGenerator:
             self.font_xlarge = ImageFont.load_default()
             self.font_medium = ImageFont.load_default()
             self.font_small = ImageFont.load_default()
+            self.font_tiny = ImageFont.load_default()
             self.font_move = ImageFont.load_default()
             self.piece_font = ImageFont.load_default()
             self.capture_font = ImageFont.load_default()
@@ -807,11 +808,15 @@ class ChessBeastVideoGenerator:
         
         # Intro frames (1 second)
         for _ in range(self.fps):
-            frame = self._render_frame(board, game_data, None, show_intro=True)
+            frame = self._render_frame(
+                board, game_data, None, show_intro=True,
+                show_full_coordinates=True, move_list=[], move_number=0
+            )
             frames.append(frame)
-        
+
         # Move frames
         last_move_data = None
+        move_list = []
         for i, move_data in enumerate(moves):
             # Track captures for display
             if move_data.is_capture and move_data.captured_piece:
@@ -819,24 +824,33 @@ class ChessBeastVideoGenerator:
                     self.current_captured_white.append(move_data.captured_piece)
                 else:
                     self.current_captured_black.append(move_data.captured_piece.upper())
-            
+
             move = chess.Move.from_uci(move_data.move_uci)
             board.push(move)
-            
+            move_list.append(move_data.move_san)
+
             for _ in range(frames_per_move):
-                frame = self._render_frame(board, game_data, move_data)
+                frame = self._render_frame(
+                    board, game_data, move_data,
+                    show_full_coordinates=False,
+                    move_list=move_list,
+                    move_number=i
+                )
                 frames.append(frame)
-            
+
             last_move_data = move_data
-            
+
             if (i + 1) % 10 == 0:
                 logger.info(f"   Processed {i + 1}/{len(moves)} moves")
-        
+
         # Outro frames with result (2 seconds)
         for _ in range(self.fps * 2):
-            frame = self._render_frame(board, game_data, last_move_data, show_result=True)
+            frame = self._render_frame(
+                board, game_data, last_move_data, show_result=True,
+                show_full_coordinates=False, move_list=move_list, move_number=len(move_list)-1
+            )
             frames.append(frame)
-        
+
         return frames, frames_per_move
     
     def _render_frame(
@@ -845,7 +859,10 @@ class ChessBeastVideoGenerator:
         game_data: GameData,
         move_data: Optional[MoveData],
         show_intro: bool = False,
-        show_result: bool = False
+        show_result: bool = False,
+        show_full_coordinates: bool = False,
+        move_list: Optional[list] = None,
+        move_number: Optional[int] = None
     ) -> np.ndarray:
         """Render a single frame."""
         frame = Image.new('RGB', (VIDEO_WIDTH, VIDEO_HEIGHT), COLORS['background'])
@@ -882,8 +899,14 @@ class ChessBeastVideoGenerator:
         self._draw_player_bar(draw, opponent_name, is_top=True, is_player=False, captured=opponent_captures, piece_color=opponent_piece_color, custom_y=opponent_bar_y)
         
         # === CHESS BOARD with ARROW ===
-        board_img = self._render_board(board, board_size, move_data, flip_board)
+        board_img = self._render_board(
+            board, board_size, move_data, flip_board, show_full_coordinates=show_full_coordinates
+        )
         frame.paste(board_img, (board_x, board_y))
+
+        # Draw move list below the board (if provided)
+        if move_list is not None and move_number is not None:
+            self._draw_move_list(draw, move_list, move_number, board_x, board_y + board_size + 60)
         
         # === PLAYER BAR (bottom) - show what we captured ===
         player_bar_y = board_y + board_size + 40  # 40 px below board
@@ -1007,7 +1030,8 @@ class ChessBeastVideoGenerator:
         board: chess.Board,
         size: int,
         move_data: Optional[MoveData],
-        flip: bool = False
+        flip: bool = False,
+        show_full_coordinates: bool = False
     ) -> Image.Image:
         """Render chess board with bold pieces and move arrow."""
         square_size = size // 8
@@ -1072,19 +1096,31 @@ class ChessBeastVideoGenerator:
                             draw.text((px + ox, py + oy), symbol, fill=outline_color, font=self.piece_font)
                         # Black piece fill
                         draw.text((px, py), symbol, fill=COLORS['black_piece'], font=self.piece_font)
-        # Draw a single small notation in the left (white) or right (black) bottom corner
         files = ['a','b','c','d','e','f','g','h']
         ranks = ['1','2','3','4','5','6','7','8']
         if flip:
             files = files[::-1]
             ranks = ranks[::-1]
-        notation = f"{files[0]}{ranks[0]}" if not flip else f"{files[7]}{ranks[0]}"
-        if not flip:
-            # White: bottom-left
-            draw.text((10, size - 10), notation, fill=(80,80,80), font=self.font_tiny, anchor="ls")
+        if show_full_coordinates:
+            # Draw file letters (a-h) at bottom
+            for i, f in enumerate(files):
+                x = i * square_size + square_size // 2
+                y = size - 22
+                draw.text((x, y), f, font=self.font_tiny, fill=(80,80,80), anchor="mm")
+            # Draw rank numbers (1-8) on left
+            for i, r in enumerate(ranks[::-1]):
+                x = 18
+                y = i * square_size + square_size // 2
+                draw.text((x, y), r, font=self.font_tiny, fill=(80,80,80), anchor="mm")
         else:
-            # Black: bottom-right
-            draw.text((size - 10, size - 10), notation, fill=(80,80,80), font=self.font_tiny, anchor="rs")
+            # Draw a single small notation in the left (white) or right (black) bottom corner
+            notation = f"{files[0]}{ranks[0]}" if not flip else f"{files[7]}{ranks[0]}"
+            if not flip:
+                # White: bottom-left
+                draw.text((10, size - 10), notation, fill=(80,80,80), font=self.font_tiny, anchor="ls")
+            else:
+                # Black: bottom-right
+                draw.text((size - 10, size - 10), notation, fill=(80,80,80), font=self.font_tiny, anchor="rs")
         
         # === DRAW MOVE ARROW ===
         if move_data:
@@ -1212,6 +1248,28 @@ class ChessBeastVideoGenerator:
         }
         with open(output_path, 'w') as f:
             json.dump(metadata, f, indent=2)
+    
+    def _draw_move_list(self, draw, move_list, current_move, x_left, y_start):
+        """Draw a scrolling move list below the board."""
+        font = self.font_move if hasattr(self, 'font_move') else self.font_medium
+        x_right = x_left + 400
+        line_height = 38
+        # Show last 8 moves (4 full moves)
+        start_idx = max(0, current_move - 7)
+        visible_moves = move_list[start_idx:current_move + 1]
+        for i, move in enumerate(visible_moves):
+            actual_idx = start_idx + i
+            move_num = (actual_idx // 2) + 1
+            is_white = actual_idx % 2 == 0
+            y = y_start + (i // 2) * line_height
+            if is_white:
+                text = f"{move_num}. {move}"
+                x = x_left
+            else:
+                text = move
+                x = x_right
+            color = COLORS['text_primary'] if actual_idx == current_move else COLORS['text_secondary']
+            draw.text((x, y), text, font=font, fill=color)
 
 # =============================================================================
 # BACKWARD COMPATIBILITY ALIAS
